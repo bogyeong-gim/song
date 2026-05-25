@@ -1,8 +1,6 @@
 import { NextRequest } from 'next/server';
-import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { AgentType, DonorType, ProjectIdea } from '@/lib/types';
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const AGENT_SYSTEM_PROMPTS: Record<AgentType, string> = {
   idea_intake: `당신은 ODA/국제개발협력 사업기획 전문가입니다.
@@ -83,8 +81,8 @@ export async function POST(req: NextRequest) {
     donor?: DonorType;
   };
 
-  if (!process.env.OPENAI_API_KEY) {
-    return new Response(JSON.stringify({ error: 'OPENAI_API_KEY not configured' }), {
+  if (!process.env.GEMINI_API_KEY) {
+    return new Response(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }), {
       status: 500, headers: { 'Content-Type': 'application/json' },
     });
   }
@@ -105,23 +103,27 @@ export async function POST(req: NextRequest) {
       `- 사업 설명: ${projectContext.description}`;
   }
 
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-1.5-flash',
+    systemInstruction: systemPrompt + contextBlock,
+  });
+
+  const history = messages.slice(0, -1).map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+  const lastMessage = messages[messages.length - 1]?.content || '';
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const completion = await openai.chat.completions.create({
-          model: 'gpt-4o',
-          stream: true,
-          messages: [
-            { role: 'system', content: systemPrompt + contextBlock },
-            ...messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-          ],
-          max_tokens: 2000,
-          temperature: 0.7,
-        });
+        const chat = model.startChat({ history });
+        const result = await chat.sendMessageStream(lastMessage);
 
-        for await (const chunk of completion) {
-          const text = chunk.choices[0]?.delta?.content || '';
+        for await (const chunk of result.stream) {
+          const text = chunk.text();
           if (text) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
           }

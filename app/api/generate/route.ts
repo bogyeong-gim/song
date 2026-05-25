@@ -1,8 +1,6 @@
 import { NextRequest } from 'next/server';
-import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { DonorType, ProjectIdea, ProposalState } from '@/lib/types';
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const SECTION_PROMPTS: Record<string, (donor: DonorType) => string> = {
   background: (donor) => `다음 프로젝트에 대한 "사업 배경 및 필요성" 섹션을 작성하세요.
@@ -41,8 +39,8 @@ export async function POST(req: NextRequest) {
     donor: DonorType;
   };
 
-  if (!process.env.OPENAI_API_KEY) {
-    return new Response(JSON.stringify({ error: 'OPENAI_API_KEY not configured' }), {
+  if (!process.env.GEMINI_API_KEY) {
+    return new Response(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }), {
       status: 500, headers: { 'Content-Type': 'application/json' },
     });
   }
@@ -70,30 +68,29 @@ ${donor === 'KOICA' ? 'KOICA 시민사회협력사업 가이드라인을 준수�
 사업 설명: ${projectState.idea.description}
 
 [PDM 요약]
-${projectState.pdm.slice(0, 6).map(r => `- [${r.level}] ${r.description}`).join('\n')}
+${projectState.pdm.slice(0, 6).map((r: { level: string; description: string }) => `- [${r.level}] ${r.description}`).join('\n')}
 
 [TOC 요약]
 - Outputs: ${projectState.toc.outputs.slice(0, 3).join(', ')}
 - Outcomes: ${projectState.toc.outcomes.slice(0, 2).join(', ')}
 - Impact: ${projectState.toc.impact}`;
 
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-1.5-flash',
+    systemInstruction: systemPrompt,
+  });
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const completion = await openai.chat.completions.create({
-          model: 'gpt-4o',
-          stream: true,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: contextBlock + '\n\n' + promptFn(donor) },
-          ],
-          max_tokens: 1500,
-          temperature: 0.6,
-        });
+        const result = await model.generateContentStream(
+          contextBlock + '\n\n' + promptFn(donor)
+        );
 
-        for await (const chunk of completion) {
-          const text = chunk.choices[0]?.delta?.content || '';
+        for await (const chunk of result.stream) {
+          const text = chunk.text();
           if (text) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
         }
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
